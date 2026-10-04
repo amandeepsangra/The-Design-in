@@ -1,12 +1,14 @@
 import { useState, useRef, useEffect } from 'react';
+import { Check } from 'lucide-react';
 
-interface MenuItem {
+export interface MenuItem {
   label: string;
   onClick: () => void;
   shortcut?: string;
   divider?: boolean;
   disabled?: boolean;
   badge?: string;
+  checked?: boolean;
 }
 
 export function DropdownMenu({ title, items }: { title: string; items: MenuItem[] }) {
@@ -33,7 +35,7 @@ export function DropdownMenu({ title, items }: { title: string; items: MenuItem[
       </button>
       
       {isOpen && (
-        <div className="absolute top-full left-0 mt-1 w-56 bg-[var(--color-panel)] border border-[var(--color-panel-border)] rounded-md shadow-2xl py-1 z-50">
+        <div className="absolute top-full left-0 mt-1 min-w-[210px] bg-[var(--color-panel)] border border-[var(--color-panel-border)] rounded-md shadow-2xl py-1 z-50">
           {items.map((item, i) => (
             item.divider ? (
               <div key={i} className="h-px bg-[var(--color-panel-border)] my-1"></div>
@@ -41,19 +43,26 @@ export function DropdownMenu({ title, items }: { title: string; items: MenuItem[
               <div
                 key={i}
                 title={item.badge ? `${item.label} — ${item.badge}` : item.label}
-                className="w-full text-left px-4 py-1.5 text-sm text-gray-600 flex justify-between items-center cursor-not-allowed"
+                className="w-full text-left px-3 py-1.5 text-sm text-gray-600 flex justify-between items-center cursor-not-allowed"
               >
-                <span>{item.label}</span>
+                <span className="flex items-center gap-2 pl-4">
+                  <span>{item.label}</span>
+                </span>
                 {item.badge && <span className="text-[9px] uppercase tracking-wide text-gray-600 bg-[var(--bg-8)] rounded px-1.5 py-0.5">{item.badge}</span>}
               </div>
             ) : (
               <button
                 key={i}
                 onClick={() => { item.onClick(); setIsOpen(false); }}
-                className="w-full text-left px-4 py-1.5 text-sm text-gray-300 hover:text-white hover:bg-[var(--color-accent)] flex justify-between items-center cursor-pointer"
+                className="w-full text-left px-3 py-1.5 text-sm text-gray-300 hover:text-white hover:bg-[var(--color-accent)] flex justify-between items-center cursor-pointer group"
               >
-                <span>{item.label}</span>
-                {item.shortcut && <span className="text-xs text-gray-500 group-hover:text-gray-200">{item.shortcut}</span>}
+                <span className="flex items-center gap-2">
+                  <span className="w-3.5 flex items-center justify-center">
+                    {item.checked && <Check size={13} className="text-current" />}
+                  </span>
+                  <span>{item.label}</span>
+                </span>
+                {item.shortcut && <span className="text-xs text-gray-500 group-hover:text-gray-200 ml-4">{item.shortcut}</span>}
               </button>
             )
           ))}

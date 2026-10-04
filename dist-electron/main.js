@@ -1,100 +1,67 @@
-import { BrowserWindow, app, ipcMain } from "electron";
-import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
+import { BrowserWindow as e, app as t, ipcMain as n } from "electron";
+import r from "node:path";
+import i from "node:fs";
+import { fileURLToPath as a } from "node:url";
 //#region electron/main.ts
-var __dirname = path.dirname(fileURLToPath(import.meta.url));
-process.env.APP_ROOT = path.join(__dirname, "..");
-var VITE_DEV_SERVER_URL = process.env["VITE_DEV_SERVER_URL"];
-var MAIN_DIST = path.join(process.env.APP_ROOT, "dist-electron");
-var RENDERER_DIST = path.join(process.env.APP_ROOT, "dist");
-process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL ? path.join(process.env.APP_ROOT, "public") : RENDERER_DIST;
-var win;
-var forceClose = false;
-var pendingFilePath = null;
-var launchArgvChecked = false;
-function extractTeaPathFromArgv(argv) {
-	return argv.find((a) => /\.tea$/i.test(a) || /\.te$/i.test(a)) || null;
+var o = r.dirname(a(import.meta.url));
+process.env.APP_ROOT = r.join(o, "..");
+var s = process.env.VITE_DEV_SERVER_URL, c = r.join(process.env.APP_ROOT, "dist-electron"), l = r.join(process.env.APP_ROOT, "dist");
+process.env.VITE_PUBLIC = s ? r.join(process.env.APP_ROOT, "public") : l;
+var u, d = !1, f = null, p = !1;
+function m(e) {
+	return e.find((e) => /\.tea$/i.test(e) || /\.te$/i.test(e)) || null;
 }
-function openTeaFile(filePath) {
-	if (win && win.webContents && !win.webContents.isLoadingMainFrame()) sendTeaFileToRenderer(filePath);
-	else pendingFilePath = filePath;
+function h(e) {
+	u && u.webContents && !u.webContents.isLoadingMainFrame() ? g(e) : f = e;
 }
-function sendTeaFileToRenderer(filePath) {
-	fs.readFile(filePath, "utf-8", (err, content) => {
-		if (err) {
-			console.error("Failed to read .tea file:", err);
+function g(e) {
+	i.readFile(e, "utf-8", (t, n) => {
+		if (t) {
+			console.error("Failed to read .tea file:", t);
 			return;
 		}
-		win?.webContents.send("file:open-path", {
-			name: path.basename(filePath),
-			content
+		u?.webContents.send("file:open-path", {
+			name: r.basename(e),
+			content: n
 		});
 	});
 }
-app.on("open-file", (event, filePath) => {
-	event.preventDefault();
-	openTeaFile(filePath);
-});
-if (!app.requestSingleInstanceLock()) app.quit();
-else app.on("second-instance", (_event, argv) => {
-	if (win) {
-		if (win.isMinimized()) win.restore();
-		win.focus();
-	}
-	const filePath = extractTeaPathFromArgv(argv);
-	if (filePath) openTeaFile(filePath);
-});
-function createWindow() {
-	win = new BrowserWindow({
-		icon: path.join(process.env.VITE_PUBLIC, "logo.png"),
-		webPreferences: { preload: path.join(__dirname, "preload.mjs") },
+t.on("open-file", (e, t) => {
+	e.preventDefault(), h(t);
+}), t.requestSingleInstanceLock() ? t.on("second-instance", (e, t) => {
+	u && (u.isMinimized() && u.restore(), u.focus());
+	let n = m(t);
+	n && h(n);
+}) : t.quit();
+function _() {
+	u = new e({
+		icon: r.join(process.env.VITE_PUBLIC, "logo.png"),
+		webPreferences: { preload: r.join(o, "preload.mjs") },
 		width: 1400,
 		height: 900,
 		minWidth: 900,
 		minHeight: 600,
-		frame: false,
+		frame: !1,
 		titleBarStyle: "hidden",
-		autoHideMenuBar: true,
+		autoHideMenuBar: !0,
 		title: "Tea Design In",
 		backgroundColor: "#1a1a1a"
-	});
-	ipcMain.on("window:minimize", () => win?.minimize());
-	ipcMain.on("window:maximize", () => {
-		if (win?.isMaximized()) win.unmaximize();
-		else win?.maximize();
-	});
-	ipcMain.on("window:close", () => win?.close());
-	ipcMain.handle("window:isMaximized", () => win?.isMaximized());
-	win.on("close", (e) => {
-		if (forceClose) return;
-		e.preventDefault();
-		win?.webContents.send("app:before-close");
-	});
-	ipcMain.on("app:confirm-close", () => {
-		forceClose = true;
-		win?.close();
-	});
-	win.webContents.on("did-finish-load", () => {
-		win?.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
-		let launchFilePath = pendingFilePath;
-		pendingFilePath = null;
-		if (!launchFilePath && !launchArgvChecked) launchFilePath = extractTeaPathFromArgv(process.argv);
-		launchArgvChecked = true;
-		if (launchFilePath) sendTeaFileToRenderer(launchFilePath);
-	});
-	if (VITE_DEV_SERVER_URL) win.loadURL(VITE_DEV_SERVER_URL);
-	else win.loadFile(path.join(RENDERER_DIST, "index.html"));
+	}), n.on("window:minimize", () => u?.minimize()), n.on("window:maximize", () => {
+		u?.isMaximized() ? u.unmaximize() : u?.maximize();
+	}), n.on("window:close", () => u?.close()), n.handle("window:isMaximized", () => u?.isMaximized()), u.on("close", (e) => {
+		d || (e.preventDefault(), u?.webContents.send("app:before-close"));
+	}), n.on("app:confirm-close", () => {
+		d = !0, u?.close();
+	}), u.webContents.on("did-finish-load", () => {
+		u?.webContents.send("main-process-message", (/* @__PURE__ */ new Date()).toLocaleString());
+		let e = f;
+		f = null, !e && !p && (e = m(process.argv)), p = !0, e && g(e);
+	}), s ? u.loadURL(s) : u.loadFile(r.join(l, "index.html"));
 }
-app.on("window-all-closed", () => {
-	if (process.platform !== "darwin") {
-		app.quit();
-		win = null;
-	}
-});
-app.on("activate", () => {
-	if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
-app.whenReady().then(createWindow);
+t.on("window-all-closed", () => {
+	process.platform !== "darwin" && (t.quit(), u = null);
+}), t.on("activate", () => {
+	e.getAllWindows().length === 0 && _();
+}), t.whenReady().then(_);
 //#endregion
-export { MAIN_DIST, RENDERER_DIST, VITE_DEV_SERVER_URL };
+export { c as MAIN_DIST, l as RENDERER_DIST, s as VITE_DEV_SERVER_URL };

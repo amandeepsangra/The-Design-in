@@ -4,6 +4,7 @@ import {
   AlignHorizontalJustifyStart, AlignHorizontalJustifyCenter, AlignHorizontalJustifyEnd,
   AlignVerticalJustifyStart, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
+  Link, Unlink, Maximize, Minimize, Move, RotateCw, RefreshCw
 } from 'lucide-react';
 
 interface PropertiesPanelProps {
@@ -35,6 +36,14 @@ const PropRow = ({ label, children }: { label: string; children: React.ReactNode
 export function PropertiesPanel({ canvas }: PropertiesPanelProps) {
   const [activeObj, setActiveObj] = useState<fabric.Object | null>(null);
 
+  // Transform / Dimensions
+  const [objW, setObjW] = useState(0);
+  const [objH, setObjH] = useState(0);
+  const [objX, setObjX] = useState(0);
+  const [objY, setObjY] = useState(0);
+  const [objAngle, setObjAngle] = useState(0);
+  const [lockAspect, setLockAspect] = useState(true);
+
   // Stroke
   const [stroke, setStroke] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState(0);
@@ -65,6 +74,12 @@ export function PropertiesPanel({ canvas }: PropertiesPanelProps) {
       setActiveObj(obj || null);
 
       if (obj) {
+        setObjW(Math.round(obj.getScaledWidth()));
+        setObjH(Math.round(obj.getScaledHeight()));
+        setObjX(Math.round(obj.left || 0));
+        setObjY(Math.round(obj.top || 0));
+        setObjAngle(Math.round(obj.angle || 0));
+
         setStroke(obj.stroke && typeof obj.stroke === 'string' ? obj.stroke : '#000000');
         setStrokeWidth(obj.strokeWidth || 0);
 
@@ -109,14 +124,141 @@ export function PropertiesPanel({ canvas }: PropertiesPanelProps) {
     canvas.on('selection:updated', updateProps);
     canvas.on('selection:cleared', updateProps);
     canvas.on('object:modified', updateProps);
+    canvas.on('object:moving', updateProps);
+    canvas.on('object:scaling', updateProps);
+    canvas.on('object:rotating', updateProps);
 
     return () => {
       canvas.off('selection:created', updateProps);
       canvas.off('selection:updated', updateProps);
       canvas.off('selection:cleared', updateProps);
       canvas.off('object:modified', updateProps);
+      canvas.off('object:moving', updateProps);
+      canvas.off('object:scaling', updateProps);
+      canvas.off('object:rotating', updateProps);
     };
   }, [canvas]);
+
+  const handleWidthChange = (newW: number) => {
+    if (!canvas || !activeObj || newW <= 0) return;
+    const baseW = activeObj.width || 1;
+    const newScaleX = newW / baseW;
+    if (lockAspect) {
+      const curAspect = activeObj.getScaledHeight() / (activeObj.getScaledWidth() || 1);
+      const newH = Math.round(newW * curAspect);
+      const baseH = activeObj.height || 1;
+      activeObj.set({ scaleX: newScaleX, scaleY: newH / baseH });
+      setObjH(newH);
+    } else {
+      activeObj.set({ scaleX: newScaleX });
+    }
+    setObjW(newW);
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+  };
+
+  const handleHeightChange = (newH: number) => {
+    if (!canvas || !activeObj || newH <= 0) return;
+    const baseH = activeObj.height || 1;
+    const newScaleY = newH / baseH;
+    if (lockAspect) {
+      const curAspect = activeObj.getScaledWidth() / (activeObj.getScaledHeight() || 1);
+      const newW = Math.round(newH * curAspect);
+      const baseW = activeObj.width || 1;
+      activeObj.set({ scaleX: newW / baseW, scaleY: newScaleY });
+      setObjW(newW);
+    } else {
+      activeObj.set({ scaleY: newScaleY });
+    }
+    setObjH(newH);
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+  };
+
+  const handleXChange = (newX: number) => {
+    if (!canvas || !activeObj) return;
+    activeObj.set('left', newX);
+    setObjX(newX);
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+  };
+
+  const handleYChange = (newY: number) => {
+    if (!canvas || !activeObj) return;
+    activeObj.set('top', newY);
+    setObjY(newY);
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+  };
+
+  const handleAngleChange = (newAngle: number) => {
+    if (!canvas || !activeObj) return;
+    activeObj.set('angle', newAngle);
+    setObjAngle(newAngle);
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+  };
+
+  const handleFitToCanvas = () => {
+    if (!canvas || !activeObj) return;
+    const cW = canvas.getWidth();
+    const cH = canvas.getHeight();
+    const maxW = cW * 0.9;
+    const maxH = cH * 0.9;
+    const s = Math.min(maxW / activeObj.width, maxH / activeObj.height, 1);
+    activeObj.scale(s);
+    activeObj.setPositionByOrigin(new fabric.Point(cW / 2, cH / 2), 'center', 'center');
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+    setObjW(Math.round(activeObj.getScaledWidth()));
+    setObjH(Math.round(activeObj.getScaledHeight()));
+    setObjX(Math.round(activeObj.left || 0));
+    setObjY(Math.round(activeObj.top || 0));
+  };
+
+  const handleFillCanvas = () => {
+    if (!canvas || !activeObj) return;
+    const cW = canvas.getWidth();
+    const cH = canvas.getHeight();
+    const s = Math.max(cW / activeObj.width, cH / activeObj.height);
+    activeObj.scale(s);
+    activeObj.setPositionByOrigin(new fabric.Point(cW / 2, cH / 2), 'center', 'center');
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+    setObjW(Math.round(activeObj.getScaledWidth()));
+    setObjH(Math.round(activeObj.getScaledHeight()));
+    setObjX(Math.round(activeObj.left || 0));
+    setObjY(Math.round(activeObj.top || 0));
+  };
+
+  const handleCenter = () => {
+    if (!canvas || !activeObj) return;
+    const cW = canvas.getWidth();
+    const cH = canvas.getHeight();
+    activeObj.setPositionByOrigin(new fabric.Point(cW / 2, cH / 2), 'center', 'center');
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+    setObjX(Math.round(activeObj.left || 0));
+    setObjY(Math.round(activeObj.top || 0));
+  };
+
+  const handleResetScale = () => {
+    if (!canvas || !activeObj) return;
+    activeObj.set({ scaleX: 1, scaleY: 1 });
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+    canvas.fire('object:modified', { target: activeObj });
+    setObjW(Math.round(activeObj.getScaledWidth()));
+    setObjH(Math.round(activeObj.getScaledHeight()));
+  };
 
   const set = (key: string, value: any) => {
     if (!canvas || !activeObj) return;
@@ -197,6 +339,50 @@ export function PropertiesPanel({ canvas }: PropertiesPanelProps) {
     canvas.requestRenderAll();
   };
 
+  const alignSingleObject = (type: 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom') => {
+    if (!canvas || !activeObj) return;
+    const cw = canvas.getWidth();
+    const ch = canvas.getHeight();
+    const zoom = canvas.getZoom() || 1;
+    const docW = Math.round(cw / zoom);
+    const docH = Math.round(ch / zoom);
+
+    activeObj.setCoords();
+    const r = activeObj.getBoundingRect();
+    const currentLeft = activeObj.left || 0;
+    const currentTop = activeObj.top || 0;
+
+    switch (type) {
+      case 'left':
+        activeObj.set('left', currentLeft - r.left);
+        break;
+      case 'hcenter':
+        activeObj.set('left', currentLeft + (docW / 2 - (r.left + r.width / 2)));
+        break;
+      case 'right':
+        activeObj.set('left', currentLeft + (docW - (r.left + r.width)));
+        break;
+      case 'top':
+        activeObj.set('top', currentTop - r.top);
+        break;
+      case 'vcenter':
+        activeObj.set('top', currentTop + (docH / 2 - (r.top + r.height / 2)));
+        break;
+      case 'bottom':
+        activeObj.set('top', currentTop + (docH - (r.top + r.height)));
+        break;
+    }
+    activeObj.setCoords();
+    canvas.requestRenderAll();
+  };
+
+  const handleAlignLeft = () => isMultiSelect ? alignLeft() : alignSingleObject('left');
+  const handleAlignHCenter = () => isMultiSelect ? alignHCenter() : alignSingleObject('hcenter');
+  const handleAlignRight = () => isMultiSelect ? alignRight() : alignSingleObject('right');
+  const handleAlignTop = () => isMultiSelect ? alignTop() : alignSingleObject('top');
+  const handleAlignVCenter = () => isMultiSelect ? alignVCenter() : alignSingleObject('vcenter');
+  const handleAlignBottom = () => isMultiSelect ? alignBottom() : alignSingleObject('bottom');
+
   const alignLeft = () => withMultiSelection((objs, b) => objs.forEach(o => {
     const r = o.getBoundingRect(); o.set('left', (o.left || 0) + (b.left - r.left));
   }));
@@ -265,20 +451,125 @@ export function PropertiesPanel({ canvas }: PropertiesPanelProps) {
           </div>
         ) : (
           <>
-            {/* Align & Distribute (only meaningful for a multi-object selection) */}
-            {isMultiSelect && <>
-              <SectionLabel label="Align & Distribute" />
-              <div className="grid grid-cols-6 gap-1 pb-2">
-                <button title="Align Left" onClick={alignLeft} className={alignBtnCls}><AlignHorizontalJustifyStart size={13} /></button>
-                <button title="Align Center Horizontal" onClick={alignHCenter} className={alignBtnCls}><AlignHorizontalJustifyCenter size={13} /></button>
-                <button title="Align Right" onClick={alignRight} className={alignBtnCls}><AlignHorizontalJustifyEnd size={13} /></button>
-                <button title="Align Top" onClick={alignTop} className={alignBtnCls}><AlignVerticalJustifyStart size={13} /></button>
-                <button title="Align Center Vertical" onClick={alignVCenter} className={alignBtnCls}><AlignVerticalJustifyCenter size={13} /></button>
-                <button title="Align Bottom" onClick={alignBottom} className={alignBtnCls}><AlignVerticalJustifyEnd size={13} /></button>
-                <button title="Distribute Horizontally (3+ objects)" onClick={distributeHorizontal} className={alignBtnCls}><AlignHorizontalDistributeCenter size={13} /></button>
-                <button title="Distribute Vertically (3+ objects)" onClick={distributeVertical} className={alignBtnCls}><AlignVerticalDistributeCenter size={13} /></button>
+            {/* Transform & Dimensions */}
+            <SectionLabel label="Transform & Size" />
+            <div className="grid grid-cols-2 gap-2 pb-2">
+              <div className="flex items-center gap-1.5 bg-[var(--bg-1)] border border-[var(--bg-7)] rounded px-2 py-1">
+                <span className="text-[10px] font-bold text-[var(--text-4)] w-3">W</span>
+                <input
+                  type="number"
+                  value={objW}
+                  onChange={e => handleWidthChange(Number(e.target.value))}
+                  className="w-full bg-transparent text-[11px] text-white outline-none"
+                  title="Width (px)"
+                />
               </div>
-            </>}
+              <div className="flex items-center gap-1.5 bg-[var(--bg-1)] border border-[var(--bg-7)] rounded px-2 py-1">
+                <span className="text-[10px] font-bold text-[var(--text-4)] w-3">H</span>
+                <input
+                  type="number"
+                  value={objH}
+                  onChange={e => handleHeightChange(Number(e.target.value))}
+                  className="w-full bg-transparent text-[11px] text-white outline-none"
+                  title="Height (px)"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 bg-[var(--bg-1)] border border-[var(--bg-7)] rounded px-2 py-1">
+                <span className="text-[10px] font-bold text-[var(--text-4)] w-3">X</span>
+                <input
+                  type="number"
+                  value={objX}
+                  onChange={e => handleXChange(Number(e.target.value))}
+                  className="w-full bg-transparent text-[11px] text-white outline-none"
+                  title="X Position"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 bg-[var(--bg-1)] border border-[var(--bg-7)] rounded px-2 py-1">
+                <span className="text-[10px] font-bold text-[var(--text-4)] w-3">Y</span>
+                <input
+                  type="number"
+                  value={objY}
+                  onChange={e => handleYChange(Number(e.target.value))}
+                  className="w-full bg-transparent text-[11px] text-white outline-none"
+                  title="Y Position"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pb-2">
+              <button
+                onClick={() => setLockAspect(!lockAspect)}
+                className={`flex items-center gap-1.5 px-2 py-1 rounded text-[10px] cursor-pointer transition-colors border ${lockAspect ? 'bg-[var(--color-accent)]/20 border-[var(--color-accent)] text-white' : 'bg-[var(--bg-1)] border-[var(--bg-7)] text-[var(--text-4)]'}`}
+                title="Lock aspect ratio"
+              >
+                {lockAspect ? <Link size={11} className="text-[var(--color-accent)]" /> : <Unlink size={11} />}
+                <span>{lockAspect ? 'Aspect Ratio Locked' : 'Free Aspect'}</span>
+              </button>
+              <div className="flex items-center gap-1 bg-[var(--bg-1)] border border-[var(--bg-7)] rounded px-2 py-1">
+                <RotateCw size={11} className="text-[var(--text-5)]" />
+                <input
+                  type="number"
+                  value={objAngle}
+                  onChange={e => handleAngleChange(Number(e.target.value))}
+                  className="w-8 bg-transparent text-[10px] text-white text-center outline-none"
+                  title="Rotation angle (degrees)"
+                />
+                <span className="text-[10px] text-[var(--text-5)]">°</span>
+              </div>
+            </div>
+
+            {/* Quick Sizing Presets */}
+            <div className="grid grid-cols-4 gap-1 pb-3">
+              <button
+                onClick={handleFitToCanvas}
+                className="px-1.5 py-1 rounded bg-[var(--bg-1)] border border-[var(--bg-7)] hover:border-[var(--color-accent)] text-[10px] text-[var(--text-3)] hover:text-white flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                title="Fit inside Canvas (90%)"
+              >
+                <Minimize size={11} />
+                <span>Fit</span>
+              </button>
+              <button
+                onClick={handleFillCanvas}
+                className="px-1.5 py-1 rounded bg-[var(--bg-1)] border border-[var(--bg-7)] hover:border-[var(--color-accent)] text-[10px] text-[var(--text-3)] hover:text-white flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                title="Fill Canvas completely"
+              >
+                <Maximize size={11} />
+                <span>Fill</span>
+              </button>
+              <button
+                onClick={handleCenter}
+                className="px-1.5 py-1 rounded bg-[var(--bg-1)] border border-[var(--bg-7)] hover:border-[var(--color-accent)] text-[10px] text-[var(--text-3)] hover:text-white flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                title="Center on Canvas"
+              >
+                <Move size={11} />
+                <span>Center</span>
+              </button>
+              <button
+                onClick={handleResetScale}
+                className="px-1.5 py-1 rounded bg-[var(--bg-1)] border border-[var(--bg-7)] hover:border-[var(--color-accent)] text-[10px] text-[var(--text-3)] hover:text-white flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                title="Reset scale to original 100%"
+              >
+                <RefreshCw size={11} />
+                <span>100%</span>
+              </button>
+            </div>
+
+            {/* Align & Distribute */}
+            <SectionLabel label={isMultiSelect ? "Align & Distribute (Selection)" : "Align to Canvas"} />
+            <div className="grid grid-cols-6 gap-1 pb-2">
+              <button title={isMultiSelect ? "Align Left (Selection)" : "Align to Canvas Left"} onClick={handleAlignLeft} className={alignBtnCls}><AlignHorizontalJustifyStart size={13} /></button>
+              <button title={isMultiSelect ? "Align Center Horizontal" : "Center Horizontally on Canvas"} onClick={handleAlignHCenter} className={alignBtnCls}><AlignHorizontalJustifyCenter size={13} /></button>
+              <button title={isMultiSelect ? "Align Right (Selection)" : "Align to Canvas Right"} onClick={handleAlignRight} className={alignBtnCls}><AlignHorizontalJustifyEnd size={13} /></button>
+              <button title={isMultiSelect ? "Align Top (Selection)" : "Align to Canvas Top"} onClick={handleAlignTop} className={alignBtnCls}><AlignVerticalJustifyStart size={13} /></button>
+              <button title={isMultiSelect ? "Align Center Vertical" : "Center Vertically on Canvas"} onClick={handleAlignVCenter} className={alignBtnCls}><AlignVerticalJustifyCenter size={13} /></button>
+              <button title={isMultiSelect ? "Align Bottom (Selection)" : "Align to Canvas Bottom"} onClick={handleAlignBottom} className={alignBtnCls}><AlignVerticalJustifyEnd size={13} /></button>
+              {isMultiSelect && (
+                <>
+                  <button title="Distribute Horizontally (3+ objects)" onClick={distributeHorizontal} className={alignBtnCls}><AlignHorizontalDistributeCenter size={13} /></button>
+                  <button title="Distribute Vertically (3+ objects)" onClick={distributeVertical} className={alignBtnCls}><AlignVerticalDistributeCenter size={13} /></button>
+                </>
+              )}
+            </div>
 
             {/* Stroke */}
             <SectionLabel label="Stroke" />

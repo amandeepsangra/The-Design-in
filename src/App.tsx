@@ -1,14 +1,16 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as fabric from 'fabric';
-import { MousePointer2, Crop, Image as ImageIcon, Type, Square, Circle, X, Plus, ZoomIn, ZoomOut, PanelRight, Minus, Triangle, Star, Pentagon, Hand, Pipette, SquareDashed, CircleDashed, Layers, Undo2, Redo2, Paintbrush, Eraser, ArrowUpDown, Ruler as RulerIcon, Grid3x3, Sun, Moon } from 'lucide-react';
+import { MousePointer2, Crop, Image as ImageIcon, Type, Square, Circle, X, Plus, ZoomIn, ZoomOut, PanelRight, Minus, Triangle, Star, Pentagon, Hand, Pipette, SquareDashed, CircleDashed, Layers, Undo2, Redo2, Paintbrush, Eraser, ArrowUpDown, Ruler as RulerIcon, Grid3x3, Sun, Moon, Download, Maximize2 } from 'lucide-react';
 import './index.css';
 import { DropdownMenu } from './components/DropdownMenu';
 import { APP_VERSION } from './version';
 import { ToolSettingsBar } from './components/ToolSettingsBar';
 import { LayersPanel } from './components/LayersPanel';
 import { PropertiesPanel } from './components/PropertiesPanel';
-import { MockupWorkspace } from './components/MockupWorkspace';
-import { Ruler } from './components/Ruler';
+import { MockupWorkspace, type MockupData } from './components/MockupWorkspace';
+import { Ruler, type RulerUnit } from './components/Ruler';
+import { exportCanvasSafely, getCleanCanvasSnapshot } from './utils/exportHelper';
+import { CanvasTransformOverlay } from './components/CanvasTransformOverlay';
 
 interface DocumentInfo {
   id: string;
@@ -16,7 +18,7 @@ interface DocumentInfo {
   width: number;
   height: number;
   background?: 'White' | 'Transparent' | 'Black';
-  mockups?: { id: string; url: string }[];
+  mockups?: MockupData[];
   activeMockupId?: string | null;
 }
 
@@ -57,7 +59,18 @@ function App() {
     return stored >= 220 && stored <= 640 ? stored : 320;
   });
   const rightPanelResizeRef = useRef(false);
-  const [showRulers, setShowRulers] = useState(false);
+  const [showRulers, setShowRulers] = useState(true);
+  const [rulerUnit, setRulerUnit] = useState<RulerUnit>(() => {
+    try {
+      const stored = localStorage.getItem('tea-ruler-unit') as RulerUnit;
+      if (['px', 'in', 'cm', 'mm', '%'].includes(stored)) return stored;
+    } catch { /* ignore */ }
+    return 'px';
+  });
+  const [rulerMenuPos, setRulerMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [rulerCursorPos, setRulerCursorPos] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+  const [guidesMap, setGuidesMap] = useState<{ [docId: string]: { h: number[]; v: number[] } }>({});
+  const [draggingGuide, setDraggingGuide] = useState<{ orientation: 'horizontal' | 'vertical'; screenPos: number; docPos: number } | null>(null);
   const [showGrid, setShowGrid] = useState(false);
   const [gridSize, setGridSize] = useState(20);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -72,6 +85,11 @@ function App() {
   const [confirmCloseDocId, setConfirmCloseDocId] = useState<string | null>(null);
   const [appCloseConfirm, setAppCloseConfirm] = useState(false);
   const [pendingRestore, setPendingRestore] = useState<AutosaveEntry[] | null>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState<{ x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
+  const canvasContainerRef = useRef<HTMLDivElement | null>(null);
 
   const [primaryColor, setPrimaryColor] = useState('#000000');
   const [secondaryColor, setSecondaryColor] = useState('#ffffff');
@@ -153,6 +171,157 @@ function App() {
     });
   }, [documents]);
 
+  const formatUnitValue = useCallback((px: number, unit: RulerUnit, dpi = 300, totalPx = 1000): string => {
+    if (unit === 'px') return `${Math.round(px)} px`;
+    if (unit === 'in') return `${(px / dpi).toFixed(2)}"`;
+    if (unit === 'cm') return `${(px / (dpi / 2.54)).toFixed(2)} cm`;
+    if (unit === 'mm') return `${(px / (dpi / 25.4)).toFixed(1)} mm`;
+    if (unit === '%') return `${Math.round((px / (totalPx || 1)) * 100)}%`;
+    return `${Math.round(px)} px`;
+  }, []);
+
+  const updateRulerUnit = useCallback((unit: RulerUnit) => {
+    setRulerUnit(unit);
+    try { localStorage.setItem('tea-ruler-unit', unit); } catch { /* ignore */ }
+    setRulerMenuPos(null);
+  }, []);
+
+  const handleClearGuides = useCallback(() => {
+    if (!activeDocId) return;
+    setGuidesMap(prev => ({ ...prev, [activeDocId]: { h: [], v: [] } }));
+  }, [activeDocId]);
+
+  const startGuideDrag = useCallback((orientation: 'horizontal' | 'vertical', _e: React.MouseEvent) => {
+    if (!activeDocId) return;
+    const doc = documents.find(d => d.id === activeDocId);
+    if (!doc) return;
+    const canvas = fabricCanvasesRef.current[activeDocId];
+    if (!canvas) return;
+    const canvasEl = canvas.getElement();
+    const rect = canvasEl.getBoundingClientRect();
+    const curZoom = zoomMap[activeDocId] || 1;
+
+    const onMove = (ev: MouseEvent) => {
+      const screenPos = orientation === 'horizontal' ? ev.clientY : ev.clientX;
+      const rawPos = orientation === 'horizontal' ? (ev.clientY - rect.top) : (ev.clientX - rect.left);
+      const docPos = Math.round(rawPos / curZoom);
+      setDraggingGuide({ orientation, screenPos, docPos });
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      setDraggingGuide(null);
+
+      const rawPos = orientation === 'horizontal' ? (ev.clientY - rect.top) : (ev.clientX - rect.left);
+      const docPos = Math.round(rawPos / curZoom);
+      const maxLen = orientation === 'horizontal' ? doc.height : doc.width;
+
+      if (docPos >= 0 && docPos <= maxLen) {
+        setGuidesMap(prev => {
+          const current = prev[activeDocId] || { h: [], v: [] };
+          if (orientation === 'horizontal') {
+            return { ...prev, [activeDocId]: { ...current, h: [...current.h, docPos] } };
+          } else {
+            return { ...prev, [activeDocId]: { ...current, v: [...current.v, docPos] } };
+          }
+        });
+      }
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [activeDocId, documents, zoomMap]);
+
+  const startMoveGuide = useCallback((orientation: 'horizontal' | 'vertical', index: number, _initialPos: number, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!activeDocId) return;
+    const doc = documents.find(d => d.id === activeDocId);
+    if (!doc) return;
+    const canvas = fabricCanvasesRef.current[activeDocId];
+    if (!canvas) return;
+    const canvasEl = canvas.getElement();
+    const rect = canvasEl.getBoundingClientRect();
+    const curZoom = zoomMap[activeDocId] || 1;
+
+    const onMove = (ev: MouseEvent) => {
+      const screenPos = orientation === 'horizontal' ? ev.clientY : ev.clientX;
+      const rawPos = orientation === 'horizontal' ? (ev.clientY - rect.top) : (ev.clientX - rect.left);
+      const docPos = Math.round(rawPos / curZoom);
+      setDraggingGuide({ orientation, screenPos, docPos });
+    };
+
+    const onUp = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      setDraggingGuide(null);
+
+      const rawPos = orientation === 'horizontal' ? (ev.clientY - rect.top) : (ev.clientX - rect.left);
+      const docPos = Math.round(rawPos / curZoom);
+      const maxLen = orientation === 'horizontal' ? doc.height : doc.width;
+
+      setGuidesMap(prev => {
+        const current = prev[activeDocId] || { h: [], v: [] };
+        if (orientation === 'horizontal') {
+          const newH = [...current.h];
+          if (docPos < 0 || docPos > maxLen) {
+            newH.splice(index, 1);
+          } else {
+            newH[index] = docPos;
+          }
+          return { ...prev, [activeDocId]: { ...current, h: newH } };
+        } else {
+          const newV = [...current.v];
+          if (docPos < 0 || docPos > maxLen) {
+            newV.splice(index, 1);
+          } else {
+            newV[index] = docPos;
+          }
+          return { ...prev, [activeDocId]: { ...current, v: newV } };
+        }
+      });
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [activeDocId, documents, zoomMap]);
+
+  const handleFitToScreen = useCallback((id: string) => {
+    const doc = documents.find(d => d.id === id);
+    const canvas = fabricCanvasesRef.current[id];
+    const container = canvasContainerRef.current;
+    if (!doc || !canvas || !container) return;
+
+    const availableW = container.clientWidth - 120;
+    const availableH = container.clientHeight - 120;
+    if (availableW <= 0 || availableH <= 0) return;
+
+    const scaleW = availableW / doc.width;
+    const scaleH = availableH / doc.height;
+    let fitZoom = Math.max(0.05, Math.min(Math.min(scaleW, scaleH), 1));
+    fitZoom = Math.round(fitZoom * 100) / 100;
+
+    canvas.setZoom(fitZoom);
+    canvas.setDimensions({
+      width: doc.width * fitZoom,
+      height: doc.height * fitZoom
+    });
+    setZoomMap(prev => ({ ...prev, [id]: fitZoom }));
+
+    // Center scroll position in container
+    setTimeout(() => {
+      if (container) {
+        const targetScrollLeft = (container.scrollWidth - container.clientWidth) / 2;
+        const targetScrollTop = (container.scrollHeight - container.clientHeight) / 2;
+        container.scrollTo({
+          left: Math.max(0, targetScrollLeft),
+          top: Math.max(0, targetScrollTop),
+          behavior: 'smooth'
+        });
+      }
+    }, 40);
+  }, [documents]);
+
   // When a new document is added and its canvas element is rendered, we initialize Fabric
   useEffect(() => {
     documents.forEach(doc => {
@@ -170,8 +339,33 @@ function App() {
           
           fabricCanvasesRef.current[doc.id] = canvas;
           historyRef.current[doc.id] = { undoStack: [], redoStack: [], isProcessing: false };
-          setZoomMap(prev => ({...prev, [doc.id]: 1}));
+
+          // Automatically fit new canvas to screen rather than defaulting to 100% (bada bada)
+          const container = canvasContainerRef.current;
+          let initialZoom = 1;
+          if (container && container.clientWidth > 0 && container.clientHeight > 0) {
+            const availW = container.clientWidth - 120;
+            const availH = container.clientHeight - 120;
+            if (availW > 0 && availH > 0) {
+              const scaleW = availW / doc.width;
+              const scaleH = availH / doc.height;
+              initialZoom = Math.max(0.05, Math.min(Math.min(scaleW, scaleH), 1));
+              initialZoom = Math.round(initialZoom * 100) / 100;
+            }
+          }
+
+          canvas.setZoom(initialZoom);
+          canvas.setDimensions({
+            width: doc.width * initialZoom,
+            height: doc.height * initialZoom,
+          });
+          setZoomMap(prev => ({...prev, [doc.id]: initialZoom}));
           canvas.renderAll();
+
+          // Schedule a refined fit after layout finishes
+          setTimeout(() => {
+            handleFitToScreen(doc.id);
+          }, 60);
 
           // History tracking events (stack is capped to avoid unbounded memory growth
           // on long editing sessions — oldest snapshots are dropped past MAX_HISTORY)
@@ -202,7 +396,7 @@ function App() {
         }
       }
     });
-  }, [documents, handleZoom, markDirty, scheduleAutosave]);
+  }, [documents, handleZoom, handleFitToScreen, markDirty, scheduleAutosave]);
 
   const handleUndo = useCallback(() => {
     if (!activeDocId) return;
@@ -309,7 +503,16 @@ function App() {
           handleZoom(activeDocId, 1 / 1.1);
         } else if (e.key === '0') {
           e.preventDefault();
-          handleZoom(activeDocId, 'reset');
+          if (activeDocId) handleFitToScreen(activeDocId);
+        } else if (e.key === '1') {
+          e.preventDefault();
+          if (activeDocId) handleZoom(activeDocId, 'reset');
+        } else if (e.key === 'e' || e.key === 'E') {
+          e.preventDefault();
+          setShowExportModal(true);
+        } else if (e.key === 'r' || e.key === 'R') {
+          e.preventDefault();
+          setShowRulers(prev => !prev);
         }
       } else if (!e.altKey) {
         // Single-letter tool shortcuts — these were already advertised in every tool's
@@ -332,6 +535,28 @@ function App() {
     // handleToolClick intentionally omitted — see comment on its definition below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDocId, handleZoom, handleUndo, handleRedo]);
+
+  // Spacebar pan listener (photoshop style hold space to pan)
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !e.repeat) {
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || (e.target as HTMLElement).isContentEditable) return;
+        setIsSpacePressed(true);
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+        setIsPanning(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+    };
+  }, []);
 
   // ─── Right panel resize handle ───
   const rightPanelWidthRef = useRef(rightPanelWidth);
@@ -408,6 +633,7 @@ function App() {
             if (history) history.isProcessing = false;
             // A restored draft was never explicitly saved by the user — keep it flagged dirty
             markDirty(entry.id);
+            handleFitToScreen(entry.id);
           });
         }
       });
@@ -630,7 +856,7 @@ function App() {
     performCloseDocument(id);
   };
 
-  const updateDocumentMockups = (id: string, mockups: { id: string; url: string }[], activeMockupId: string | null) => {
+  const updateDocumentMockups = (id: string, mockups: MockupData[], activeMockupId: string | null) => {
     setDocuments(prev => prev.map(doc => 
       doc.id === id ? { ...doc, mockups, activeMockupId } : doc
     ));
@@ -646,11 +872,8 @@ function App() {
     const doc = documents.find(d => d.id === activeDocId);
     if (!canvas || !doc) return;
     
-    // Create a thumbnail
-    const oldZoom = canvas.getZoom();
-    canvas.setZoom(1);
-    const thumbnail = canvas.toDataURL({ format: 'jpeg', quality: 0.5, multiplier: 0.2 });
-    canvas.setZoom(oldZoom);
+    // Create a clean thumbnail without zoom distortion
+    const thumbnail = getCleanCanvasSnapshot(canvas, doc.width, doc.height, 400);
 
     const payload = {
       version: '1.0',
@@ -704,6 +927,7 @@ function App() {
           canvas.loadFromJSON(canvasData).then(() => {
             canvas.requestRenderAll();
             if (history) history.isProcessing = false;
+            handleFitToScreen(newDocId);
           });
         }
       }, 100);
@@ -711,7 +935,7 @@ function App() {
       console.error('Failed to parse .tea file', err);
       alert('Invalid .tea file format');
     }
-  }, []);
+  }, [handleFitToScreen]);
 
   const handleOpenProject = () => {
     const input = document.createElement('input');
@@ -742,22 +966,24 @@ function App() {
     return () => electronWindow.offOpenFile?.(registeredListener);
   }, [loadTeaFile]);
 
-  const handleExport = (format: 'png' | 'jpeg') => {
+  const handleExport = async (format: 'png' | 'jpeg' | 'webp' | 'svg', multiplier: number = 1, quality: number = 0.95, customName?: string) => {
     const canvas = getActiveCanvas();
     const doc = documents.find(d => d.id === activeDocId);
     if (!canvas || !doc) return;
-    const oldZoom = canvas.getZoom();
-    canvas.setZoom(1);
-    const dataURL = canvas.toDataURL({
-      format: format,
-      quality: 1,
-      multiplier: 1
-    });
-    canvas.setZoom(oldZoom);
-    const link = document.createElement('a');
-    link.href = dataURL;
-    link.download = `${doc.name}.${format}`;
-    link.click();
+    try {
+      setGlobalLoading('Exporting high-resolution artwork...');
+      await exportCanvasSafely(canvas, doc.width, doc.height, {
+        format,
+        multiplier,
+        quality,
+        fileName: customName || doc.name,
+      });
+    } catch (e) {
+      console.error('Export error:', e);
+      alert('Failed to export. Please try again.');
+    } finally {
+      setGlobalLoading(null);
+    }
   };
 
   // Tool actions
@@ -835,8 +1061,15 @@ function App() {
               const maxW = docW * 0.8, maxH = docH * 0.8;
               const scale = Math.min(maxW / fImg.width, maxH / fImg.height, 1);
               fImg.scale(scale);
+              const scaledW = fImg.getScaledWidth();
+              const scaledH = fImg.getScaledHeight();
+              fImg.set({
+                left: (docW - scaledW) / 2,
+                top: (docH - scaledH) / 2,
+                originX: 'left',
+                originY: 'top',
+              });
               canvas.add(fImg);
-              canvas.centerObject(fImg);
               fImg.setCoords();
               canvas.setActiveObject(fImg);
               canvas.requestRenderAll(); setActiveTool('select'); setGlobalLoading(null);
@@ -883,8 +1116,9 @@ function App() {
       canvas.requestRenderAll();
     } else if (tool === 'brush' || tool === 'eraser') {
       canvas.isDrawingMode = true;
-      if (tool === 'eraser' && (fabric as any).EraserBrush) {
-         canvas.freeDrawingBrush = new (fabric as any).EraserBrush(canvas);
+      const eraserCls = (window as any).fabric?.EraserBrush;
+      if (tool === 'eraser' && eraserCls) {
+         canvas.freeDrawingBrush = new eraserCls(canvas);
       } else if (!canvas.freeDrawingBrush || canvas.freeDrawingBrush.constructor.name !== 'PencilBrush') {
          canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
       }
@@ -893,9 +1127,9 @@ function App() {
            canvas.freeDrawingBrush.color = primaryColor;
            canvas.freeDrawingBrush.width = 5;
         } else {
-           // Fallback to white if no EraserBrush
-           if (!(fabric as any).EraserBrush) {
-               canvas.freeDrawingBrush.color = '#ffffff';
+           const bg = doc?.background === 'Black' ? '#000000' : '#ffffff';
+           if (!eraserCls) {
+               canvas.freeDrawingBrush.color = bg;
            }
            canvas.freeDrawingBrush.width = 20;
         }
@@ -1038,8 +1272,11 @@ function App() {
               { label: 'Open Project...', shortcut: 'Ctrl+O', onClick: () => handleOpenProject() },
               { divider: true, label: '', onClick: () => {} },
               { label: 'Save Project', shortcut: 'Ctrl+S', onClick: () => handleSaveProject() },
-              { label: 'Export PNG', onClick: () => handleExport('png') },
-              { label: 'Export JPG', onClick: () => handleExport('jpeg') }
+              { divider: true, label: '', onClick: () => {} },
+              { label: 'Export Options...', shortcut: 'Ctrl+E', onClick: () => setShowExportModal(true) },
+              { label: 'Quick Export PNG', onClick: () => handleExport('png') },
+              { label: 'Quick Export JPG', onClick: () => handleExport('jpeg') },
+              { label: 'Export Vector SVG', onClick: () => handleExport('svg') }
             ]},
             { title: 'Edit', items: [
               { label: 'Undo', shortcut: 'Ctrl+Z', onClick: handleUndo },
@@ -1058,6 +1295,23 @@ function App() {
               { label: 'Blur', onClick: handleBlur },
               { label: 'Sharpen', onClick: handleSharpen },
               { label: 'Color Adjust', onClick: () => { if (activeDocId) setShowColorAdjustModal(true); else alert('Open a document first'); } }
+            ]},
+            { title: 'View', items: [
+              { label: 'Rulers', shortcut: 'Ctrl+R', checked: showRulers, onClick: () => setShowRulers(!showRulers) },
+              { divider: true, label: '', onClick: () => {} },
+              { label: 'Pixels (px)', checked: rulerUnit === 'px', onClick: () => updateRulerUnit('px') },
+              { label: 'Inches (in)', checked: rulerUnit === 'in', onClick: () => updateRulerUnit('in') },
+              { label: 'Centimeters (cm)', checked: rulerUnit === 'cm', onClick: () => updateRulerUnit('cm') },
+              { label: 'Millimeters (mm)', checked: rulerUnit === 'mm', onClick: () => updateRulerUnit('mm') },
+              { label: 'Percent (%)', checked: rulerUnit === '%', onClick: () => updateRulerUnit('%') },
+              { divider: true, label: '', onClick: () => {} },
+              { label: 'Snap to Grid', checked: showGrid, shortcut: "Ctrl+'", onClick: () => setShowGrid(!showGrid) },
+              { label: 'Clear Guides', onClick: handleClearGuides },
+              { divider: true, label: '', onClick: () => {} },
+              { label: 'Zoom In', shortcut: 'Ctrl++', onClick: () => activeDocId && handleZoom(activeDocId, 1.1) },
+              { label: 'Zoom Out', shortcut: 'Ctrl+-', onClick: () => activeDocId && handleZoom(activeDocId, 1 / 1.1) },
+              { label: 'Fit on Screen', shortcut: 'Ctrl+0', onClick: () => activeDocId && handleFitToScreen(activeDocId) },
+              { label: '100% Actual Size', shortcut: 'Ctrl+1', onClick: () => activeDocId && handleZoom(activeDocId, 'reset') },
             ]},
             { title: 'AI', items: [
               { label: 'Remove Background', onClick: handleRemoveBackground },
@@ -1110,7 +1364,7 @@ function App() {
 
         {/* Right: Zoom + Panel + Window Controls — no-drag */}
         <div className="flex items-center ml-auto h-full" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {/* Zoom */}
+          {/* Zoom & Fit */}
           <div className="flex items-center gap-0.5 px-2">
             <button onClick={() => activeDocId && handleZoom(activeDocId, 1 / 1.1)} disabled={!activeDocId}
               className="text-[var(--text-6)] hover:text-white disabled:opacity-20 cursor-pointer p-1 rounded hover:bg-[var(--bg-5)] transition-colors" title="Zoom Out" aria-label="Zoom Out">
@@ -1124,7 +1378,22 @@ function App() {
               className="text-[var(--text-6)] hover:text-white disabled:opacity-20 cursor-pointer p-1 rounded hover:bg-[var(--bg-5)] transition-colors" title="Zoom In" aria-label="Zoom In">
               <ZoomIn size={13} />
             </button>
+            <button onClick={() => activeDocId && handleFitToScreen(activeDocId)} disabled={!activeDocId}
+              className="text-[var(--text-6)] hover:text-white disabled:opacity-20 cursor-pointer p-1 rounded hover:bg-[var(--bg-5)] transition-colors ml-0.5" title="Fit to Screen" aria-label="Fit to Screen">
+              <Maximize2 size={13} />
+            </button>
           </div>
+
+          {/* Quick Export Button */}
+          <button
+            onClick={() => activeDocId && setShowExportModal(true)}
+            disabled={!activeDocId}
+            className="flex items-center gap-1.5 bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] text-white px-2.5 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer shadow disabled:opacity-30 mr-2"
+            title="Export Artwork (Ctrl+E)"
+          >
+            <Download size={12} />
+            <span>Export</span>
+          </button>
 
           {/* Theme Toggle */}
           <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
@@ -1381,8 +1650,31 @@ function App() {
         </div>
 
         {/* Main Canvas Area */}
-        <div className="flex-1 bg-[var(--bg-2)] overflow-auto p-12 relative flex"
-             onDragOver={(e) => e.preventDefault()}
+        <div
+          ref={canvasContainerRef}
+          className="flex-1 bg-[var(--bg-2)] overflow-auto p-12 relative flex select-none"
+          onMouseDown={(e) => {
+            if (activeTool === 'hand' || isSpacePressed || e.button === 1) {
+              setIsPanning(true);
+              if (canvasContainerRef.current) {
+                setPanStart({
+                  x: e.clientX,
+                  y: e.clientY,
+                  scrollLeft: canvasContainerRef.current.scrollLeft,
+                  scrollTop: canvasContainerRef.current.scrollTop,
+                });
+              }
+            }
+          }}
+          onMouseMove={(e) => {
+            if (isPanning && panStart && canvasContainerRef.current) {
+              canvasContainerRef.current.scrollLeft = panStart.scrollLeft - (e.clientX - panStart.x);
+              canvasContainerRef.current.scrollTop = panStart.scrollTop - (e.clientY - panStart.y);
+            }
+          }}
+          onMouseUp={() => setIsPanning(false)}
+          onMouseLeave={() => setIsPanning(false)}
+          onDragOver={(e) => e.preventDefault()}
              onDrop={(e) => {
                e.preventDefault();
                if (!activeDocId) return;
@@ -1420,6 +1712,7 @@ function App() {
                }
              }}
              style={{
+               cursor: (activeTool === 'hand' || isSpacePressed) ? (isPanning ? 'grabbing' : 'grab') : 'default',
                backgroundImage: `linear-gradient(45deg, var(--bg-3) 25%, transparent 25%), linear-gradient(-45deg, var(--bg-3) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, var(--bg-3) 75%), linear-gradient(-45deg, transparent 75%, var(--bg-3) 75%)`,
                backgroundSize: '20px 20px',
                backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0px'
@@ -1448,14 +1741,67 @@ function App() {
                       gridTemplateColumns: `${showRulers ? 18 : 0}px auto`,
                       gridTemplateRows: `${showRulers ? 18 : 0}px auto`,
                     }}>
-                      <div className="bg-[var(--bg-3)] border-r border-b border-[var(--bg-8)] overflow-hidden" />
+                      {/* Photoshop-style Ruler Corner Box */}
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); setRulerMenuPos({ x: e.clientX, y: e.clientY }); }}
+                        onContextMenu={(e) => { e.preventDefault(); setRulerMenuPos({ x: e.clientX, y: e.clientY }); }}
+                        className="bg-[var(--bg-3)] border-r border-b border-[var(--bg-8)] flex items-center justify-center text-[9px] font-mono font-bold text-[var(--text-4)] hover:text-white hover:bg-[var(--bg-4)] cursor-pointer select-none transition-colors"
+                        title={`Current Unit: ${rulerUnit.toUpperCase()} (Click or right-click to change)`}
+                      >
+                        {rulerUnit}
+                      </button>
                       <div className="overflow-hidden">
-                        {showRulers && <Ruler orientation="horizontal" length={doc.width} zoom={currentZoom} thickness={18} />}
+                        {showRulers && (
+                          <Ruler
+                            orientation="horizontal"
+                            length={doc.width}
+                            zoom={currentZoom}
+                            thickness={18}
+                            unit={rulerUnit}
+                            dpi={(doc as any).dpi || 300}
+                            cursorPos={rulerCursorPos.x}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setRulerMenuPos({ x: e.clientX, y: e.clientY });
+                            }}
+                            onStartGuideDrag={startGuideDrag}
+                          />
+                        )}
                       </div>
                       <div className="overflow-hidden">
-                        {showRulers && <Ruler orientation="vertical" length={doc.height} zoom={currentZoom} thickness={18} />}
+                        {showRulers && (
+                          <Ruler
+                            orientation="vertical"
+                            length={doc.height}
+                            zoom={currentZoom}
+                            thickness={18}
+                            unit={rulerUnit}
+                            dpi={(doc as any).dpi || 300}
+                            cursorPos={rulerCursorPos.y}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              setRulerMenuPos({ x: e.clientX, y: e.clientY });
+                            }}
+                            onStartGuideDrag={startGuideDrag}
+                          />
+                        )}
                       </div>
-                      <div className="bg-white relative" style={{ width: doc.width * currentZoom, height: doc.height * currentZoom }}>
+                      <div
+                        className="bg-white relative"
+                        style={{ width: doc.width * currentZoom, height: doc.height * currentZoom }}
+                        onMouseMove={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const z = currentZoom || 1;
+                          setRulerCursorPos({
+                            x: Math.round((e.clientX - rect.left) / z),
+                            y: Math.round((e.clientY - rect.top) / z),
+                          });
+                        }}
+                        onMouseLeave={() => {
+                          setRulerCursorPos({ x: null, y: null });
+                        }}
+                      >
                         <canvas id={`canvas-${doc.id}`} />
                         {showGrid && (
                           <div
@@ -1466,6 +1812,46 @@ function App() {
                             }}
                           />
                         )}
+
+                        {/* Document Guides Layer */}
+                        {showRulers && activeDocId && guidesMap[activeDocId] && (
+                          <div className="absolute inset-0 pointer-events-none overflow-visible z-20">
+                            {guidesMap[activeDocId].h?.map((gy, i) => (
+                              <div
+                                key={`h-${i}`}
+                                className="absolute left-0 right-0 pointer-events-auto cursor-row-resize group"
+                                style={{ top: `${gy * currentZoom}px`, height: '7px', transform: 'translateY(-3px)' }}
+                                onMouseDown={(e) => startMoveGuide('horizontal', i, gy, e)}
+                                title={`Horizontal Guide: ${formatUnitValue(gy, rulerUnit, (doc as any).dpi || 300, doc.height)} (Drag to move, drag back to ruler to delete)`}
+                              >
+                                <div className="w-full h-px bg-[#00e5ff] group-hover:bg-[#ff007f] shadow-[0_0_3px_#00e5ff]" />
+                              </div>
+                            ))}
+                            {guidesMap[activeDocId].v?.map((gx, i) => (
+                              <div
+                                key={`v-${i}`}
+                                className="absolute top-0 bottom-0 pointer-events-auto cursor-col-resize group"
+                                style={{ left: `${gx * currentZoom}px`, width: '7px', transform: 'translateX(-3px)' }}
+                                onMouseDown={(e) => startMoveGuide('vertical', i, gx, e)}
+                                title={`Vertical Guide: ${formatUnitValue(gx, rulerUnit, (doc as any).dpi || 300, doc.width)} (Drag to move, drag back to ruler to delete)`}
+                              >
+                                <div className="h-full w-px bg-[#00e5ff] group-hover:bg-[#ff007f] shadow-[0_0_3px_#00e5ff]" />
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <CanvasTransformOverlay
+                          canvas={fabricCanvasesRef.current[doc.id] || null}
+                          zoom={currentZoom}
+                          docWidth={doc.width}
+                          docHeight={doc.height}
+                          activeTool={activeTool}
+                          onModified={() => {
+                            markDirty(doc.id);
+                            scheduleAutosave();
+                          }}
+                        />
                       </div>
                     </div>
                   </div>
@@ -1509,6 +1895,9 @@ function App() {
                     mockups={documents.find(d => d.id === activeDocId)?.mockups || []}
                     activeMockupId={documents.find(d => d.id === activeDocId)?.activeMockupId || null}
                     onChange={(mockups, activeMockupId) => updateDocumentMockups(activeDocId, mockups, activeMockupId)}
+                    docWidth={documents.find(d => d.id === activeDocId)?.width || 1000}
+                    docHeight={documents.find(d => d.id === activeDocId)?.height || 1000}
+                    docName={documents.find(d => d.id === activeDocId)?.name || 'Tea-Mockup'}
                   />
                 )}
               </div>
@@ -1608,6 +1997,16 @@ function App() {
         />
       )}
 
+      {/* Export Artwork Modal */}
+      {showExportModal && activeDocId && (
+        <ExportModal
+          doc={documents.find(d => d.id === activeDocId)!}
+          canvas={fabricCanvasesRef.current[activeDocId] || null}
+          onClose={() => setShowExportModal(false)}
+          onExport={(fmt, mult, qual, fn) => handleExport(fmt, mult, qual, fn)}
+        />
+      )}
+
       {/* Autosave recovery prompt */}
       {pendingRestore && (
         <RestoreSessionModal
@@ -1634,6 +2033,83 @@ function App() {
             <p className="text-[var(--text-6)] text-xs mt-1">Please wait...</p>
           </div>
         </div>
+      )}
+
+      {/* Active Dragging Guide Preview */}
+      {draggingGuide && (
+        <div className="fixed inset-0 z-[100] cursor-crosshair pointer-events-none select-none">
+          {draggingGuide.orientation === 'horizontal' ? (
+            <div
+              className="fixed left-0 right-0 h-px bg-[#00e5ff] shadow-[0_0_5px_#00e5ff]"
+              style={{ top: `${draggingGuide.screenPos}px` }}
+            >
+              <span className="absolute left-16 -top-5 bg-[var(--bg-3)] border border-[var(--bg-8)] px-1.5 py-0.5 rounded text-[10px] text-[#00e5ff] font-mono shadow-md">
+                Y: {formatUnitValue(draggingGuide.docPos, rulerUnit, 300, 1000)}
+              </span>
+            </div>
+          ) : (
+            <div
+              className="fixed top-0 bottom-0 w-px bg-[#00e5ff] shadow-[0_0_5px_#00e5ff]"
+              style={{ left: `${draggingGuide.screenPos}px` }}
+            >
+              <span className="absolute top-16 left-2 bg-[var(--bg-3)] border border-[var(--bg-8)] px-1.5 py-0.5 rounded text-[10px] text-[#00e5ff] font-mono shadow-md">
+                X: {formatUnitValue(draggingGuide.docPos, rulerUnit, 300, 1000)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Photoshop-style Ruler Context Menu */}
+      {rulerMenuPos && (
+        <>
+          <div
+            className="fixed inset-0 z-[120]"
+            onClick={() => setRulerMenuPos(null)}
+            onContextMenu={(e) => { e.preventDefault(); setRulerMenuPos(null); }}
+          />
+          <div
+            className="fixed z-[130] bg-[var(--bg-3)] border border-[var(--bg-8)] rounded-md shadow-2xl py-1 text-xs text-white min-w-[170px]"
+            style={{
+              left: `${Math.min(rulerMenuPos.x, window.innerWidth - 180)}px`,
+              top: `${Math.min(rulerMenuPos.y, window.innerHeight - 240)}px`,
+            }}
+          >
+            <div className="px-3 py-1 text-[10px] uppercase font-bold text-[var(--text-6)] tracking-wider border-b border-[var(--bg-8)] mb-1">
+              Ruler Units
+            </div>
+            {[
+              { id: 'px', label: 'Pixels' },
+              { id: 'in', label: 'Inches' },
+              { id: 'cm', label: 'Centimeters' },
+              { id: 'mm', label: 'Millimeters' },
+              { id: '%', label: 'Percent' },
+            ].map(u => (
+              <button
+                key={u.id}
+                onClick={() => updateRulerUnit(u.id as RulerUnit)}
+                className="w-full text-left px-3 py-1.5 hover:bg-[var(--color-accent)] hover:text-white flex items-center justify-between cursor-pointer"
+              >
+                <span>{u.label}</span>
+                {rulerUnit === u.id && <span className="font-bold text-[var(--color-accent)]">✓</span>}
+              </button>
+            ))}
+            <div className="h-px bg-[var(--bg-8)] my-1" />
+            <button
+              onClick={() => { setShowRulers(false); setRulerMenuPos(null); }}
+              className="w-full text-left px-3 py-1.5 hover:bg-[var(--bg-8)] text-gray-300 hover:text-white flex items-center justify-between cursor-pointer"
+            >
+              <span>Hide Rulers</span>
+              <span className="text-[10px] text-gray-500">Ctrl+R</span>
+            </button>
+            <button
+              onClick={() => { handleClearGuides(); setRulerMenuPos(null); }}
+              className="w-full text-left px-3 py-1.5 hover:bg-[var(--bg-8)] text-gray-300 hover:text-white flex items-center justify-between cursor-pointer"
+            >
+              <span>Clear Guides</span>
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1782,6 +2258,144 @@ function NewDocumentModal({ onClose, onCreate }: { onClose: () => void, onCreate
             </div>
           </div>
 
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Export Artwork Modal Component
+function ExportModal({
+  doc,
+  onClose,
+  onExport,
+}: {
+  doc: DocumentInfo;
+  canvas?: fabric.Canvas | null;
+  onClose: () => void;
+  onExport: (format: 'png' | 'jpeg' | 'webp' | 'svg', multiplier: number, quality: number, fileName: string) => void;
+}) {
+  const [format, setFormat] = useState<'png' | 'jpeg' | 'webp' | 'svg'>('png');
+  const [multiplier, setMultiplier] = useState<number>(1);
+  const [quality, setQuality] = useState<number>(95);
+  const [fileName, setFileName] = useState(doc.name);
+
+  const outW = Math.round(doc.width * multiplier);
+  const outH = Math.round(doc.height * multiplier);
+
+  return (
+    <div className="absolute inset-0 bg-black/70 flex items-center justify-center z-50 backdrop-blur-md select-none">
+      <div className="bg-[var(--bg-7)] rounded-xl w-[480px] shadow-2xl flex flex-col overflow-hidden border border-[var(--bg-9)] text-gray-200">
+        <div className="flex justify-between items-center px-5 py-4 border-b border-[var(--bg-9)] bg-[var(--bg-8)]">
+          <div className="flex items-center gap-2">
+            <Download size={18} className="text-[var(--color-accent)]" />
+            <h2 className="font-semibold text-base text-white">Export Artwork</h2>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-white cursor-pointer"><X size={18} /></button>
+        </div>
+
+        <div className="p-5 space-y-4 bg-[var(--bg-6)]">
+          <div>
+            <label className="text-xs text-[var(--text-4)] block mb-1.5 font-medium">File Name</label>
+            <input
+              type="text"
+              value={fileName}
+              onChange={e => setFileName(e.target.value)}
+              className="w-full bg-[var(--bg-3)] border border-[var(--bg-8)] rounded px-3 py-1.5 text-sm text-white outline-none focus:border-[var(--color-accent)]"
+            />
+          </div>
+
+          <div>
+            <label className="text-xs text-[var(--text-4)] block mb-1.5 font-medium">Format</label>
+            <div className="grid grid-cols-4 gap-2">
+              {(['png', 'jpeg', 'webp', 'svg'] as const).map(fmt => (
+                <button
+                  key={fmt}
+                  onClick={() => setFormat(fmt)}
+                  className={`py-2 px-1 text-center rounded border text-xs font-medium uppercase transition-colors cursor-pointer ${
+                    format === fmt
+                      ? 'bg-[var(--color-accent)] border-[var(--color-accent)] text-white'
+                      : 'bg-[var(--bg-3)] border-[var(--bg-8)] text-[var(--text-3)] hover:text-white'
+                  }`}
+                >
+                  {fmt === 'jpeg' ? 'JPG' : fmt}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-[var(--text-5)] mt-1.5">
+              {format === 'png' ? 'Lossless PNG • Preserves transparency, ideal for mugs & stickers.' :
+               format === 'jpeg' ? 'Standard compressed JPG • Clean white background, ideal for print.' :
+               format === 'webp' ? 'Next-gen WebP • High compression with transparency support.' :
+               'Vector SVG • Infinitely scalable resolution for professional printers.'}
+            </p>
+          </div>
+
+          <div>
+            <label className="text-xs text-[var(--text-4)] block mb-1.5 font-medium">Export Resolution / Multiplier</label>
+            <div className="grid grid-cols-4 gap-2">
+              {[
+                { m: 1, label: '1x (Screen)' },
+                { m: 2, label: '2x (Print)' },
+                { m: 3, label: '3x (HD)' },
+                { m: 4, label: '4x (Ultra)' }
+              ].map(opt => (
+                <button
+                  key={opt.m}
+                  onClick={() => setMultiplier(opt.m)}
+                  className={`py-2 px-1 text-center rounded border text-xs font-medium transition-colors cursor-pointer ${
+                    multiplier === opt.m
+                      ? 'bg-[var(--color-accent)] border-[var(--color-accent)] text-white'
+                      : 'bg-[var(--bg-3)] border-[var(--bg-8)] text-[var(--text-3)] hover:text-white'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {(format === 'jpeg' || format === 'webp') && (
+            <div>
+              <div className="flex justify-between items-center mb-1">
+                <label className="text-xs text-[var(--text-4)] font-medium">Image Quality</label>
+                <span className="text-xs font-mono text-white">{quality}%</span>
+              </div>
+              <input
+                type="range"
+                min="40"
+                max="100"
+                value={quality}
+                onChange={e => setQuality(Number(e.target.value))}
+                className="w-full accent-[var(--color-accent)] h-1 cursor-pointer"
+              />
+            </div>
+          )}
+
+          {format !== 'svg' && (
+            <div className="bg-[var(--bg-4)] p-3 rounded-lg border border-[var(--bg-8)] flex justify-between items-center text-xs">
+              <span className="text-[var(--text-4)]">Output Canvas Size:</span>
+              <span className="font-mono text-white font-semibold">{outW} × {outH} px</span>
+            </div>
+          )}
+        </div>
+
+        <div className="p-4 bg-[var(--bg-8)] border-t border-[var(--bg-9)] flex justify-end gap-2.5">
+          <button
+            onClick={onClose}
+            className="px-4 py-2 rounded text-xs text-gray-300 hover:text-white bg-[var(--bg-5)] hover:bg-[var(--bg-4)] cursor-pointer"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => {
+              onExport(format, multiplier, quality / 100, fileName.trim() || doc.name);
+              onClose();
+            }}
+            className="flex items-center gap-1.5 px-5 py-2 rounded text-xs font-semibold text-white bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)] cursor-pointer shadow-lg transition-colors"
+          >
+            <Download size={14} />
+            Export Artwork
+          </button>
         </div>
       </div>
     </div>
@@ -2005,7 +2619,11 @@ const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
     ['Ctrl/Cmd + C', 'Copy'], ['Ctrl/Cmd + V', 'Paste'], ['Delete / Backspace', 'Delete selection'],
   ]},
   { title: 'View', items: [
-    ['Ctrl/Cmd + "+"', 'Zoom in'], ['Ctrl/Cmd + "-"', 'Zoom out'], ['Ctrl/Cmd + 0', 'Reset zoom'],
+    ['Ctrl/Cmd + R', 'Toggle Rulers'],
+    ['Ctrl/Cmd + 0', 'Fit on screen'],
+    ['Ctrl/Cmd + 1', '100% Actual size'],
+    ['Ctrl/Cmd + "+"', 'Zoom in'],
+    ['Ctrl/Cmd + "-"', 'Zoom out'],
     ['Ctrl/Cmd + Scroll', 'Zoom at cursor'],
   ]},
   { title: 'File', items: [
